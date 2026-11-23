@@ -126,6 +126,7 @@ class Dataset():
         self.genome_size =  sum(self.chromsizes.values())
         self.organism = organism_name
         self.experiment_names = experiment_names
+        self.is_gene_table = isinstance(genome, str) and genome.endswith(('.tsv', '.csv', '.bed'))
 
         # load DNA as a dict of stings for each chromosome
         if genome is not None:
@@ -226,6 +227,8 @@ preprocessed .npy files')
 
     def _make_dna(self, genome, chroms):
         '''Makes a dict of chromosomes' sequences'''
+        if getattr(self, 'is_gene_table', False):
+          return self._make_genes(genome, chroms)
         chroms = chroms.copy()
         DNA = dict()
         short = []
@@ -286,6 +289,90 @@ chrom names or genome file doesn't contain these chromosomes. Check chrom names\
                 raise ValueError("No DNA found. Seems fasta file doesn't \
 contain chroms listed in the Hi-C map files. Check chrom names in .fasta and \
 .cool files - may be they differ")
+        return DNA
+    def _encode_chrom_genes(self, df_chr, chrom_len, max_score):
+        '''Encodes a chromosome gene table into a (chrom_len, 4) float32 matrix'''
+        encoded_chrom = np.zeros((chrom_len, 4), dtype=np.float32)
+
+        df_plus = df_chr[df_chr['strand'] == '+']
+        df_minus = df_chr[df_chr['strand'] == '-']
+
+        for row in df_plus.itertuples():
+            start = int(row.start)
+            end = int(row.end)
+            length = end - start
+            if length > 0:
+                norm_score = (np.log1p(max(0, row.score)) / max_score) if max_score > 0 else 0.0
+                encoded_chrom[start:end, 0] = np.maximum(encoded_chrom[start:end, 0], norm_score)
+                encoded_chrom[start:end, 2] = np.maximum(encoded_chrom[start:end, 2], np.linspace(1.0, 0.0, length, dtype=np.float32))
+
+        for row in df_minus.itertuples():
+            start = int(row.start)
+            end = int(row.end)
+            length = end - start
+            if length > 0:
+                norm_score = (np.log1p(max(0, row.score)) / max_score) if max_score > 0 else 0.0
+                encoded_chrom[start:end, 1] = np.maximum(encoded_chrom[start:end, 1], norm_score)
+                encoded_chrom[start:end, 3] = np.maximum(encoded_chrom[start:end, 3], np.linspace(0.0, 1.0, length, dtype=np.float32))
+
+        return encoded_chrom
+
+    def _make_genes(self, genome, chroms):
+        '''Makes a dict of chromosomes' gene matrices from a file or a directory'''
+        chroms = chroms.copy()
+        DNA = dict()
+        short = []
+        correct_chrom_order = []
+
+        if os.path.isdir(genome):
+            available_files = os.listdir(genome)
+            tables = {}
+            all_scores = []
+            for file_name in available_files:
+                chrom = file_name.split('.')[0]
+                if chrom in chroms:
+                    full_path = os.path.join(genome, file_name)
+                    df_chr = pd.read_csv(full_path, sep="\t")
+                    tables[chrom] = df_chr
+                    all_scores.append(np.log1p(df_chr["score"].clip(lower=0)).max())
+            max_score = max(all_scores) if len(all_scores) > 0 else 0.0
+
+            for chrom, df_chr in tables.items():
+                if self.chromsizes[chrom] < self.dna_len * 4:
+                    print(f"Chromosome {chrom} is too short")
+                    short.append(chrom)
+                else:
+                    DNA[chrom] = self._encode_chrom_genes(df_chr, self.chromsizes[chrom], max_score)
+                    print(f'Gene data for {chrom} is loaded')
+                    correct_chrom_order.append(chrom)
+        else:
+            df_all = pd.read_csv(genome, sep="\t")
+            max_score = np.log1p(df_all["score"].clip(lower=0)).max()
+            for chrom in chroms:
+                df_chr = df_all[df_all["chrom"] == chrom]
+                if len(df_chr) == 0:
+                    continue
+                if self.chromsizes[chrom] < self.dna_len * 4:
+                    print(f"Chromosome {chrom} is too short")
+                    short.append(chrom)
+                else:
+                    DNA[chrom] = self._encode_chrom_genes(df_chr, self.chromsizes[chrom], max_score)
+                    print(f'Gene data for {chrom} is loaded')
+                    correct_chrom_order.append(chrom)
+
+        for chrom in chroms:
+            if chrom in short:
+                self.chromnames.remove(chrom)
+            elif chrom not in DNA.keys():
+                self.chromnames.remove(chrom)
+                print(f'No gene data found for {chrom}')
+
+        self.chromnames.sort(key=lambda x: correct_chrom_order.index(x))
+        self.chromsizes = {i: self.chromsizes[i] for i in self.chromnames}
+        gc.collect()
+        print()
+        if len(DNA) == 0:
+            raise ValueError("No gene data found. Check chromosome names in your .tsv and .mcool files.")
         return DNA
 
 
@@ -604,6 +691,8 @@ map size ({chrom_len})')
 
     def _slice_dna(self, chrom, start, end, seq=False, edge_policy='error', fixed_size=False):
         '''returns one-hot encoded dna from the given region'''
+        if getattr(self, 'is_gene_table', False):
+            return self._slice_genes(chrom, start, end, edge_policy=edge_policy, fixed_size=fixed_size)    
         rev_comp = False
         if start > end:
             rev_comp = True
@@ -644,6 +733,43 @@ chrom size ({chrom_len})')
             #if rev_comp:
             #   dna = np.flip(dna)
             return dna
+
+    def _slice_genes(self, chrom, start, end, edge_policy='error', fixed_size=False):
+        '''Slices a (L, 4) gene matrix window from a chromosome'''
+        rev_comp = False
+        if start > end:
+            rev_comp = True
+            start, end = end, start
+        if fixed_size:
+            end = start + self.dna_len
+
+        chrom_len = self.chromsizes[chrom]
+        left_pad = max(0, -start)
+        right_pad = max(0, end - chrom_len)
+
+        if (left_pad > 0 or right_pad > 0) and edge_policy == 'error':
+            raise ValueError(f'Coordinates {start, end} exceed chrom {chrom} chrom size ({chrom_len})')
+
+        s = max(0, start)
+        e = min(chrom_len, end)
+        gene_slice = self.DNA[chrom][s:e]
+
+        if left_pad > 0 or right_pad > 0:
+            if edge_policy == 'empty':
+                left_empty = np.zeros((left_pad, 4), dtype=np.float32)
+                right_empty = np.zeros((right_pad, 4), dtype=np.float32)
+                gene_slice = np.concatenate([left_empty, gene_slice, right_empty], axis=0)
+            elif edge_policy == 'cyclic':
+                left_empty = self.DNA[chrom][-left_pad:] if left_pad > 0 else np.zeros((0, 4), dtype=np.float32)
+                right_empty = self.DNA[chrom][:right_pad] if right_pad > 0 else np.zeros((0, 4), dtype=np.float32)
+                gene_slice = np.concatenate([left_empty, gene_slice, right_empty], axis=0)
+            else:
+                raise ValueError("edge_policy should be 'error', 'empty' or 'cyclic'")
+
+        if rev_comp:
+            gene_slice = np.flip(gene_slice, axis=0)[:, [1, 0, 3, 2]]
+
+        return gene_slice
 
     def _find_good_regions(self, check=None, nan_threshold=None, step=1):
         '''Find all regions in Hi-C map with appropriate quality'''
