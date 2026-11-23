@@ -290,6 +290,7 @@ chrom names or genome file doesn't contain these chromosomes. Check chrom names\
 contain chroms listed in the Hi-C map files. Check chrom names in .fasta and \
 .cool files - may be they differ")
         return DNA
+        
     def _encode_chrom_genes(self, df_chr, chrom_len, max_score):
         '''Encodes a chromosome gene table into a (chrom_len, 4) float32 matrix'''
         encoded_chrom = np.zeros((chrom_len, 4), dtype=np.float32)
@@ -303,8 +304,8 @@ contain chroms listed in the Hi-C map files. Check chrom names in .fasta and \
             length = end - start
             if length > 0:
                 norm_score = (np.log1p(max(0, row.score)) / max_score) if max_score > 0 else 0.0
-                encoded_chrom[start:end, 0] = np.maximum(encoded_chrom[start:end, 0], norm_score)
-                encoded_chrom[start:end, 2] = np.maximum(encoded_chrom[start:end, 2], np.linspace(1.0, 0.0, length, dtype=np.float32))
+                encoded_chrom[start:end, 0] += norm_score
+                encoded_chrom[start:end, 2] += np.linspace(1.0, 0.0, length, dtype=np.float32)
 
         for row in df_minus.itertuples():
             start = int(row.start)
@@ -312,11 +313,10 @@ contain chroms listed in the Hi-C map files. Check chrom names in .fasta and \
             length = end - start
             if length > 0:
                 norm_score = (np.log1p(max(0, row.score)) / max_score) if max_score > 0 else 0.0
-                encoded_chrom[start:end, 1] = np.maximum(encoded_chrom[start:end, 1], norm_score)
-                encoded_chrom[start:end, 3] = np.maximum(encoded_chrom[start:end, 3], np.linspace(0.0, 1.0, length, dtype=np.float32))
+                encoded_chrom[start:end, 1] += norm_score
+                encoded_chrom[start:end, 3] += np.linspace(0.0, 1.0, length, dtype=np.float32)
 
         return encoded_chrom
-
     def _make_genes(self, genome, chroms):
         '''Makes a dict of chromosomes' gene matrices from a file or a directory'''
         chroms = chroms.copy()
