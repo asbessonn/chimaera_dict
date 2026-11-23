@@ -359,11 +359,15 @@ class DNATrainValGenerator(DataGenerator):
             return x, y, mask
 
     def rev_comp(self, x, y, mask):
-        x = np.flip(x, axis=(1, 2))
+        if getattr(getattr(self.x, 'data', None), 'is_gene_table', False):
+            x = np.flip(x, axis=1)[..., [1, 0, 3, 2]]
+        else:
+            x = np.flip(x, axis=(1, 2))
         y = np.flip(y, axis=2)
         if mask is not None:
             mask = np.flip(mask, axis=2)
         return x, y, mask
+
 
 
 class DNAPredictGenerator(DataGenerator):
@@ -508,3 +512,4 @@ on many datasets at the same time'''
         x = np.concatenate(x)
         x, _ = self.transform(x, x)
         return x, x
+
